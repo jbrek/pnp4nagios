@@ -3,7 +3,7 @@
 /**
  * Retrieves and manipulates current status of hosts (and services?)
  */
-class Data_Model extends Model
+class Data_Model extends System_Model
 {
 
     private $XML   = array();
@@ -11,19 +11,20 @@ class Data_Model extends Model
     public  $MACRO = array();
     private $RRD   = array();
     public  $STRUCT  = array();
-    public  $TIMERANGE  = array();    
-    public  $PAGE_DEF   = array();    
+    public  $TIMERANGE  = array();
+    public  $PAGE_DEF   = array();
     public  $PAGE_GRAPH = array();
     public  $XPORT = "";
     public  $TEMPLATE_FILE = "";
     public  $GRAPH_TYPE = 'normal';
     /*
-    * 
+    *
     *
     */
     public function __construct(){
-        $this->config = new Config_Model();    
+        $this->config = new Config_Model();
         $this->config->read_config();
+        $this->auth = new Auth_Model();
     }
 
     /*
@@ -45,6 +46,7 @@ class Data_Model extends Model
             }
         }
         if(sizeof($templates) > 0){
+            sort($templates);
             return $templates;
         }else{
             return FALSE;
@@ -60,32 +62,39 @@ class Data_Model extends Model
         }
     }
     /*
-    * 
+    *
     *
     */
     public function getHosts() {
         $hosts = array();
         $conf = $this->config->conf;
         $i = 0;
-           if (is_dir($conf['rrdbase'])) {
-               if ($dh = opendir($conf['rrdbase'])) {
-                   while (($file = readdir($dh)) !== false) {
-                       if ($file == "." || $file == ".." || $file == ".pnp-internal")
-                           continue;
-                       $stat = stat($conf['rrdbase'] . "/" . $file);
-                       $age = (time() - $stat['mtime']);
-                       $hosts[$i]['name'] = $file;
-                       $hosts[$i]['sort'] = strtoupper($file);
-                       if ($age < $conf['max_age']) {
-                           $hosts[$i]['state'] = 'active';
-                       } else {
-                           $hosts[$i]['state'] = 'inactive';
-                       }
+            if (is_dir($conf['rrdbase'])) {
+                if ($dh = opendir($conf['rrdbase'])) {
+                    while (($file = readdir($dh)) !== false) {
+                        if ($file == "." || $file == ".." || $file == ".pnp-internal")
+                            continue;
+
+                        if (is_file($conf['rrdbase'] . "/" . $file) )
+                            continue;
+
+                        if($this->auth->is_authorized($file) === FALSE)
+                            continue;
+
+                        $stat = stat($conf['rrdbase'] . "/" . $file);
+                        $age = (time() - $stat['mtime']);
+                        $hosts[$i]['name'] = $file;
+                        $hosts[$i]['sort'] = strtoupper($file);
+                        if ($age < $conf['max_age']) {
+                            $hosts[$i]['state'] = 'active';
+                        } else {
+                            $hosts[$i]['state'] = 'inactive';
+                        }
                 $i++;
                    }
                    closedir($dh);
                } else {
-                throw new Kohana_User_Exception('Perfdata Dir', "Can not open $path");
+                    throw new Kohana_User_Exception('Perfdata Dir', "Can not open $path");
                }
            }
         if(sizeof($hosts)>0){
@@ -104,7 +113,7 @@ class Data_Model extends Model
 
 
     /*
-    * 
+    *
     *
     */
     function getRawServices($hostname) {
@@ -125,16 +134,18 @@ class Data_Model extends Model
                     $fullpath = $path . "/" . $file;
                     $stat = stat("$fullpath");
                     $age = (time() - $stat['mtime']);
-                    
-                    $state = "active";    
+
+                    $state = "active";
                     if ($age > $conf['max_age']) { # 6Stunden
                         $state = "inactive";
                     }
                     $services[$i]['state'] = $state;
-                    $services[$i]['name'] = $servicedesc[1]; 
+                    $services[$i]['name'] = $servicedesc[1];
                     $i++;
                 }
             }
+        }else{
+            throw new Kohana_Exception('error.perfdata-dir-for-host', $path, $hostname );
         }
         if( is_array($services) && sizeof($services) > 0){
             # Obtain a list of columns
@@ -144,11 +155,13 @@ class Data_Model extends Model
             # Sort the data with volume descending, edition ascending
             # Add $data as the last parameter, to sort by the common key
             array_multisort($sort, SORT_STRING, $services);
-        }        
+        }else{
+            throw new Kohana_Exception('error.host-perfdata-dir-empty', $path, $hostname );
+        }
         return $services;
     }
     /*
-    * 
+    *
     *
     */
     function getServices($hostname) {
@@ -160,14 +173,21 @@ class Data_Model extends Model
             if(!$this->readXML($hostname, $s['name'], FALSE)){
                 continue;
             }
-    
             if($s['name'] == "_HOST_"){
+                // Check authorization
+                if($this->auth->is_authorized((string) $this->XML->NAGIOS_AUTH_HOSTNAME, "_HOST_") === FALSE)
+                    continue;
+
                 $host[0]['name']             = "_HOST_";
                 $host[0]['hostname']         = (string) $this->XML->NAGIOS_HOSTNAME;
                 $host[0]['state']            = $s['state'];
                 $host[0]['servicedesc']      = "Host Perfdata";
                 $host[0]['is_multi']         = (string) $this->XML->DATASOURCE[0]->IS_MULTI[0];
             }else{
+                // Check authorization
+                if($this->auth->is_authorized((string) $this->XML->NAGIOS_AUTH_HOSTNAME, (string) $this->XML->NAGIOS_AUTH_SERVICEDESC) === FALSE )
+                    continue;
+
                 $services[$i]['name']        = $s['name'];
                 // Sorting check_multi
                 if( (string) $this->XML->NAGIOS_MULTI_PARENT == ""){
@@ -193,7 +213,7 @@ class Data_Model extends Model
             # Sort the data with volume descending, edition ascending
             # Add $data as the last parameter, to sort by the common key
             array_multisort($sort, SORT_STRING, $services);
-        }        
+        }
         if(is_array($host) && sizeof($host) > 0 ){
             array_unshift($services, $host[0]);
         }
@@ -201,7 +221,7 @@ class Data_Model extends Model
     }
 
     /*
-    * 
+    *
     *
     */
     public function getFirstService($hostname) {
@@ -219,7 +239,7 @@ class Data_Model extends Model
     }
 
     /*
-    * 
+    *
     *
     */
     public function getFirstHost() {
@@ -237,18 +257,32 @@ class Data_Model extends Model
     }
 
     /*
-    * 
+    *
     *
     */
     public function readXML ($hostname, $servicedesc, $throw_exception=TRUE){
         $conf        = $this->config->conf;
-        $this->XML   = array();
-        $this->MACRO = array();
-        $this->DS    = array();
-        $xml         = array();
         $xmlfile     = $conf['rrdbase'].$hostname."/".$servicedesc.".xml";
+        $xml         = array();
         if (file_exists($xmlfile)) {
-            $xml = simplexml_load_file($xmlfile);
+            libxml_use_internal_errors(TRUE);
+            libxml_clear_errors(TRUE);
+            if(! $xml = simplexml_load_file($xmlfile) ){;
+                if( $throw_exception == TRUE ){
+                    $errors = '<br>';
+                    foreach(libxml_get_errors() as $error) {
+                         $errors .= $error->message."<br>";
+                    }
+                    throw new Kohana_Exception('error.xml-generic_error',$xmlfile, $errors);
+                }else{
+                    return FALSE;
+                }
+            }
+            $this->XML   = array();
+            $this->MACRO = array();
+            $this->MACRO['AUTH_SERVICEDESC'] = '';
+            $this->MACRO['AUTH_HOSTNAME'] = '';
+            $this->DS    = array();
             // Throw excaption without a valid structure version
             if(!isset($xml->XML->VERSION) && $throw_exception == TRUE){
                 throw new Kohana_Exception('error.xml-structure-without-version-tag',$xmlfile);
@@ -270,7 +304,7 @@ class Data_Model extends Model
                     #$$key[$i] = (string) $val;
                     $this->DS[$i][$key] = (string) $val;
                 }
-                $i++; 
+                $i++;
             }
             $this->XML = $xml;
             return TRUE;
@@ -280,20 +314,20 @@ class Data_Model extends Model
     }
 
     /*
-    * 
+    *
     *
     */
-    public function buildDataStruct ($host = FALSE, $service = FALSE, $view = "", $source = ""){
-        if($host === false && $service === false){
-            return false;
+    public function buildDataStruct ($host = FALSE, $service = FALSE, $view = NULL, $source = NULL){
+        if($host === FALSE && $service === FALSE){
+            return FALSE;
         }
         $conf = $this->config->conf;
 
         /*
-         * Special Templates without Host/Service
+         * Special templates without Host/Service
          */
         if($host == '__special' ){
-            // $service contains the Template name
+            // $service contains the template name
             $this->includeTemplate($service,'special');
         }else{
             if( $this->readXML($host,$service) == FALSE ){
@@ -306,7 +340,7 @@ class Data_Model extends Model
             $view = intval($view);
             $i=0;
             foreach( $this->RRD['def'] as $key=>$val){
-                if( $source != "" && $source != $key ){
+                if( ! is_null($source) && $source != $key ){
                     continue;
                 }
                 $tmp_struct = array();
@@ -316,13 +350,14 @@ class Data_Model extends Model
                 $tmp_struct['SOURCE']        = $key;
                 $tmp_struct['RRD_CALL']      = $this->TIMERANGE['cmd'] . " ". $this->RRD['opt'][$key] . " " . $this->RRD['def'][$key];
                 $tmp_struct['TIMERANGE']     = $this->TIMERANGE;
-                if(array_key_exists('ds_name',$this->RRD) ){
+                $tmp_struct['GRAPH_WIDTH']   = $this->getGraphDimensions('width',  $tmp_struct['RRD_CALL']);
+                $tmp_struct['GRAPH_HEIGHT']  = $this->getGraphDimensions('height', $tmp_struct['RRD_CALL']);
+                if(isset($this->RRD['ds_name'][$key]) ){
                      $tmp_struct['ds_name']   = $this->RRD['ds_name'][$key];
-                }else{
+                }elseif(array_key_exists($i, $this->DS)){
                      $tmp_struct['ds_name']   = $this->DS[$i]['NAME'];
-                }
-                if($this->DS){
-                    $tmp_struct['DS']      = $this->DS[$i];
+                }else{
+                     $tmp_struct['ds_name']   = "UNDEF";
                 }
                 $tmp_struct['MACRO']   = $this->MACRO;
                 if(isset($this->XML->XML->VERSION)){
@@ -335,12 +370,12 @@ class Data_Model extends Model
             }
         return;
         }
-        if( $view == ""){
+        if( $view === ""){
             $v = 0;
             foreach($this->config->views as $view_key=>$view_val){
                 $i=0;
                 foreach( $this->RRD['def'] as $key=>$val){
-                    if($source != "" && $source != $key ){
+                    if( ! is_null($source) && $source != $key ){
                         continue;
                     }
                     $tmp_struct = array();
@@ -349,15 +384,16 @@ class Data_Model extends Model
                     $tmp_struct['TEMPLATE_FILE'] = $this->TEMPLATE_FILE;;
                     $tmp_struct['SOURCE']        = $key;
                     $tmp_struct['RRD_CALL']      = $this->TIMERANGE[$v]['cmd'] . " " . $this->RRD['opt'][$key] . " " . $this->RRD['def'][$key];
-                    if(array_key_exists('ds_name',$this->RRD) ){
-                            $tmp_struct['ds_name']   = $this->RRD['ds_name'][$key];
+                    $tmp_struct['GRAPH_WIDTH']   = $this->getGraphDimensions('width',  $tmp_struct['RRD_CALL']);
+                    $tmp_struct['GRAPH_HEIGHT']  = $this->getGraphDimensions('height', $tmp_struct['RRD_CALL']);
+                    if(isset($this->RRD['ds_name'][$key]) ){
+                        $tmp_struct['ds_name']   = $this->RRD['ds_name'][$key];
+                    }elseif(array_key_exists($i, $this->DS)){
+                        $tmp_struct['ds_name']   = $this->DS[$i]['NAME'];
                     }else{
-                            $tmp_struct['ds_name']   = $this->DS[$i]['NAME'];
+                        $tmp_struct['ds_name']   = "UNDEF";
                     }
                     $tmp_struct['TIMERANGE']     = $this->TIMERANGE[$v];
-                    if($this->DS){
-                        $tmp_struct['DS']            = $this->DS[$i];
-                    }
                     $tmp_struct['MACRO']         = $this->MACRO;
                     if(isset($this->XML->XML->VERSION)){
                         $tmp_struct['VERSION']   = pnp::xml_version_check( (string) $this->XML->XML->VERSION);
@@ -373,7 +409,7 @@ class Data_Model extends Model
             $view = intval($view);
             $i=0;
             foreach( $this->RRD['def'] as $key=>$val){
-                if( $source != "" && $source != $key ){
+                if( ! is_null($source) && $source != $key ){
                     continue;
                 }
                 $tmp_struct = array();
@@ -383,13 +419,14 @@ class Data_Model extends Model
                 $tmp_struct['SOURCE']        = $key;
                 $tmp_struct['RRD_CALL']      = $this->TIMERANGE[$view]['cmd'] . " ". $this->RRD['opt'][$key] . " " . $this->RRD['def'][$key];
                 $tmp_struct['TIMERANGE']     = $this->TIMERANGE[$view];
-                if(array_key_exists('ds_name',$this->RRD) ){
-                     $tmp_struct['ds_name']  = $this->RRD['ds_name'][$key];
+                $tmp_struct['GRAPH_WIDTH']   = $this->getGraphDimensions('width',  $tmp_struct['RRD_CALL']);
+                $tmp_struct['GRAPH_HEIGHT']  = $this->getGraphDimensions('height', $tmp_struct['RRD_CALL']);
+                if(isset($this->RRD['ds_name'][$key]) ){
+                    $tmp_struct['ds_name']   = $this->RRD['ds_name'][$key];
+                }elseif(array_key_exists($i, $this->DS)){
+                    $tmp_struct['ds_name']   = $this->DS[$i]['NAME'];
                 }else{
-                     $tmp_struct['ds_name']  = $this->DS[$i]['NAME'];
-                }
-                if($this->DS){
-                    $tmp_struct['DS']            = $this->DS[$i];
+                    $tmp_struct['ds_name']   = "UNDEF";
                 }
                 $tmp_struct['MACRO']         = $this->MACRO;
                 if(isset($this->XML->XML->VERSION)){
@@ -404,7 +441,7 @@ class Data_Model extends Model
     }
 
     /*
-    * 
+    *
     *
     */
     private function addToDataStruct ($data=FALSE) {
@@ -412,10 +449,10 @@ class Data_Model extends Model
             return FALSE;
 
         array_push($this->STRUCT, $data);
-    } 
+    }
 
     /*
-    * 
+    *
     *
     */
     private function includeTemplate($template=FALSE,$type='normal'){
@@ -440,7 +477,7 @@ class Data_Model extends Model
         $opt     = FALSE;
         $ds_name = FALSE;
         /*
-        * 0.4.x Template compatibility 
+        * 0.4.x Template compatibility
         */
         foreach($this->DS as $key=>$val ){
             $key++;
@@ -462,11 +499,11 @@ class Data_Model extends Model
             include($template_file);
             ob_end_clean();
         }
-       // Compatibility for very old Templates
+        // Compatibility for very old Templates
         if(!is_array($def) && $def != FALSE){
             $tmp[1] = $def;
             $def = $tmp;
-        }    
+        }
         if(!is_array($opt) && $opt != FALSE){
             $tmp[1] = $opt;
             $opt = $tmp;
@@ -476,25 +513,58 @@ class Data_Model extends Model
             $ds_name = $tmp;
         }
         //
-
         if($def != FALSE){
-            $this->RRD['def'] = $def;
+            $this->RRD['def'] = $this->array_reindex($def);
         }else{
             throw new Kohana_Exception('error.template-without-def', $template_file);
         }
         if($opt != FALSE ){
-            $this->RRD['opt'] = $opt;
+            $this->RRD['opt'] = $this->array_reindex($opt);
         }else{
             throw new Kohana_Exception('error.template-without-opt', $template_file);
         }
         if( $ds_name != FALSE ){
-            $this->RRD['ds_name'] = $ds_name;
+            $this->RRD['ds_name'] = $this->array_reindex($ds_name);
         }
-        return TRUE;        
+        return TRUE;
     }
-    
+
+    #
+    #
+    #
+    private function getGraphDimensions($search, $command){
+        if($search == 'width'){
+            if(preg_match_all('/(-w|--width|--width=)\s([0-9]+)\s/i',$command,$match)){
+                $value = array_pop($match[2]);
+                return $value;
+            }else{
+                return $this->config->conf['graph_width'];
+            }
+        }
+        if($search == 'height'){
+            if(preg_match_all('/(-h|--height|--height=)\s([0-9]+)\s/i',$command,$match)){
+                $value = array_pop($match[2]);
+                return $value;
+            }else{
+                return $this->config->conf['graph_height'];
+            }
+        }
+        return FALSE;
+    }
+    #
+    #
+    #
+    private function array_reindex($data){
+        $i=0;
+        foreach($data as $d){
+            $tmp[$i] = $d;
+            $i++;
+        }
+        return $tmp;
+    }
+
     /*
-    * 
+    *
     *
     */
     public function findTemplate($template,$type='normal'){
@@ -503,13 +573,13 @@ class Data_Model extends Model
          * Normal templates
          */
         if($type == 'normal'){
-            // Build a list of directorys to search for templates 
+            // Build a list of directories to search for templates
             $template_dirs = array();
             if(array_key_exists('template_dirs', $this->config->conf)){
                 foreach($this->config->conf['template_dirs'] as $dir){
                     $template_dirs[] = $dir;
                 }
-            }    
+            }
             foreach(Kohana::config('core.template_dirs') as $dir){
                 $template_dirs[] = $dir;
             }
@@ -545,7 +615,7 @@ class Data_Model extends Model
     }
 
     /*
-    * 
+    *
     *
     */
     function findRecursiveTemplate($template, $dir) {
@@ -591,7 +661,7 @@ class Data_Model extends Model
             if(!is_numeric($end)){
                 $timestamp = strtotime($end);
                 if(!$timestamp){
-                    throw new Kohana_User_Exception('Wrong Format', "$end");
+                    throw new Kohana_User_Exception('Wrong Format', "End -> $end");
                 }else{
                     $end = $timestamp;
                 }
@@ -621,7 +691,7 @@ class Data_Model extends Model
             $this->TIMERANGE = $timerange;
             return;
         }
-        
+
            $view=intval( pnp::clean($view) );
            if($view >= sizeof($this->config->views)){
                $view = 1;
@@ -676,13 +746,37 @@ class Data_Model extends Model
            $this->TIMERANGE = $timerange;
     }
 
+    public function buildBasketStruct($basket,$view = NULL){
+        if(is_array($basket) && sizeof($basket) > 0){
+            if($view == ""){
+                 $views = array_keys($this->config->views);
+            }else{
+                 $views = array($view);
+            }
+            foreach($views as $view){
+                foreach($basket as $item){
+                    # explode host::service::source
+                    $slices = explode("::",$item);
+                    if(sizeof($slices) == 2)
+                        $this->buildDataStruct($slices[0], $slices[1], $view);
+                    if(sizeof($slices) == 3)
+                        $this->buildDataStruct($slices[0], $slices[1], $view, $slices[2]);
+                }
+                # break on custom time ranges
+                if(isset($this->TIMERANGE['type']) && $this->TIMERANGE['type'] == "start-end"){
+                    break;
+                }
+            }
+        }
+    }
+
     public function buildPageStruct($page,$view){
         $servicelist = array();
         $this->parse_page_cfg($page);
         $hosts = $this->getHostsByPage();
         # No regex so we keep the order defined by config
         if($this->PAGE_DEF['use_regex'] == 0){
-            #loop through page definitions 
+            #Loop through graph definitions
             foreach($this->PAGE_GRAPH as $graph){
                 $hosts_to_search_for = explode(",", $graph['host_name']);
                 foreach($hosts_to_search_for as $host){
@@ -690,12 +784,13 @@ class Data_Model extends Model
                         $services = $this->getServices($host);
                         foreach($services as $service) {
                             // search for definition
-                            $data = $this->filterServiceByPage($host,$service);
+                            $data = $this->filterServiceByPage($graph,$host,$service);
                             if($data){
                                 $servicelist[] = array( 'host' => $host, 'service' => $service['name'], 'source' => $data['source']);
+
                             }
                         }
-                    }    
+                    }
                 }
             }
         }else{
@@ -703,20 +798,20 @@ class Data_Model extends Model
                 $services = $this->getServices($host);
                 foreach($services as $service) {
                     // search for definition
-                    $data = $this->filterServiceByPage($host,$service);
+                    $data = $this->filterServiceByPage($this->PAGE_GRAPH,$host,$service);
                     if($data){
                         $servicelist[] = array( 'host' => $host, 'service' => $service['name'], 'source' => $data['source']);
                     }
                 }
             }
         }
-        #print Kohana::debug(sizeof($servicelist));
+        #print Kohana::debug($servicelist);
         if(sizeof($servicelist) > 0 ){
             foreach($servicelist as $s){
                 $this->buildDataStruct($s['host'],$s['service'],$view,$s['source']);
             }
         }else{
-            throw new Kohana_Exception('error.no-data-for-page', $page.".cfg" );
+            $this->ERROR = "ERROR: ". Kohana::lang('error.no-data-for-page', $page.".cfg" );
         }
     }
 
@@ -775,7 +870,9 @@ class Data_Model extends Model
             if($host['state'] == "inactive"){
                 continue;
             }
-            $new_hosts[] = $this->filterHostByPage($host['name']);
+            if($tmp = $this->filterHostByPage($host['name'])){
+                $new_hosts[] = $tmp;
+            }
         }
         return $new_hosts;
     }
@@ -801,7 +898,7 @@ class Data_Model extends Model
         return FALSE;
     }
 
-    private function filterServiceByPage($host,$service){
+    private function filterServiceByPage($g,$host,$service){
         $data = array();
         if(isset($this->PAGE_DEF['use_regex']) && $this->PAGE_DEF['use_regex'] == 1){
             // Search Host by regex
@@ -810,8 +907,8 @@ class Data_Model extends Model
                     if(isset($g['service_desc']) && preg_match('/'.$g['service_desc'].'/',$service['name'])){
                         $data['service_desc'] = $g['service_desc'];
                         $data['host_name'] = $g['host_name'];
-                        $data['source'] = "";
-                        // if we only want a single image 
+                        $data['source'] = NULL;
+                        // if we only want a single image
                         if(isset($g['source'])){
                             $this->readXML($host,$service['name']);
                             $this->includeTemplate($this->DS[0]['TEMPLATE']);
@@ -825,25 +922,23 @@ class Data_Model extends Model
                 }
             }
         }else{
-            foreach( $this->PAGE_GRAPH as $g ){
-                $hosts_to_search_for = explode(",", $g['host_name']);
-                $services_to_search_for = explode(",", $g['service_desc']);
-                if(isset($g['host_name']) && in_array($host ,$hosts_to_search_for) ){
-                    if(isset($g['service_desc']) && in_array($service['name'] ,$services_to_search_for) ){
-                        $data['service_desc'] = $g['service_desc'];
-                        $data['host_name'] = $g['host_name'];
-                        $data['source'] = "";
-                        // if we only want a single image 
-                        if(isset($g['source'])){
-                            $this->readXML($host,$service['name']);
-                            $this->includeTemplate($this->DS[0]['TEMPLATE']);
-                            $source = intval($g['source']);
-                            if(array_key_exists($source,$this->RRD['def'])){
-                                $data['source'] = $source;
-                            }
+            $hosts_to_search_for = explode(",", $g['host_name']);
+            $services_to_search_for = explode(",", $g['service_desc']);
+            if(isset($g['host_name']) && in_array($host ,$hosts_to_search_for) ){
+                if(isset($g['service_desc']) && in_array($service['name'] ,$services_to_search_for) ){
+                    $data['service_desc'] = $g['service_desc'];
+                    $data['host_name'] = $g['host_name'];
+                    $data['source'] = NULL;
+                    // if we only want a single image
+                    if(isset($g['source'])){
+                        $this->readXML($host,$service['name']);
+                        $this->includeTemplate($this->DS[0]['TEMPLATE']);
+                        $source = intval($g['source']);
+                        if(array_key_exists($source,$this->RRD['def'])){
+                            $data['source'] = $source;
                         }
-                        return $data;
                     }
+                    return $data;
                 }
             }
         }
@@ -867,11 +962,12 @@ class Data_Model extends Model
                 die("Cannot open directory:  $path");
             }
         }
-        if(sizeof($pages)>0){
-            
+        //if(sizeof($pages)>0){
+        if(is_array($pages) && sizeof($pages) > 0 ){
+
             natsort($pages);
         }else{
-            return FALSE; 
+            return FALSE;
         }
         return $pages;
     }
@@ -881,7 +977,7 @@ class Data_Model extends Model
     */
     public function getFirstPage(){
         $pages = $this->getPages();
-        if(sizeof($pages) > 0 ){
+        if(is_array($pages) && sizeof($pages) > 0 ){
             return urldecode($pages[0]);
         }else{
             return FALSE;
@@ -908,7 +1004,7 @@ class Data_Model extends Model
         $count = 0;
         $RRAs = array('MIN','MAX','AVERAGE');
         foreach($this->DS as $key=>$value){
-            foreach($RRAs as $RRA){ 
+            foreach($RRAs as $RRA){
                 $this->XPORT .= sprintf(" DEF:%d%s=%s:%d:%s ",$count,$RRA,$value['RRDFILE'],$value['DS'],$RRA);
                 $this->XPORT .= sprintf(" XPORT:%d%s:%s_%s "    ,$count,$RRA,$value['NAME'],$RRA);
             }
@@ -924,19 +1020,29 @@ class Data_Model extends Model
         foreach($xml->meta->legend->entry as $key=>$value){
             $csv .= ";" . $value ;
         }
+
+        /*
+        * from rrdtool 1.5 on, timestamp ( value->t ) is not set anymore
+        * from 1.6 on it can be reactivated by -- showrime option to rrdtool xport
+        * here we take care of the timestamp ourselves regardless which
+        * rrdtool version is used
+        */
+        $timestamp2 = $xml->meta->start;
+        $step = $xml->meta->step;
         $csv .= "\n";
         foreach($xml->data->row as $key=>$value){
-            $csv .= (string) $value->t ;
+            $csv .= $timestamp2;
             foreach($value->v as $item){
                 $csv .= ";".floatval((string) $item);
             }
             $csv .= "\n";
+            $timestamp2 = $timestamp2 + $step;
         }
-        return $csv;    
+        return $csv;
     }
 
     /*
-    * 
+    *
     * Used in Special Templates to gather data
     */
     public function tplGetData ($hostname, $servicedesc, $throw_exception=TRUE){
@@ -963,7 +1069,7 @@ class Data_Model extends Model
                 foreach ( $datasource  as $key=>$val){
                     $data['DS'][$i][$key] = (string) $val;
                 }
-                $i++; 
+                $i++;
             }
             return $data;
         }else{
@@ -971,12 +1077,12 @@ class Data_Model extends Model
         }
     }
     /*
-    * 
+    *
     * Used in Special Templates to gather data
     */
     public function tplGetServices ($hostregex=FALSE, $serviceregex = ''){
         if($hostregex === FALSE){
-            return FALSE; 
+            return FALSE;
         }
         $hostregex    = sprintf("/%s/",$hostregex);
         $serviceregex = sprintf("/%s/",$serviceregex);
@@ -1015,6 +1121,6 @@ class Data_Model extends Model
         }
 
         return $new_services;
-            
+
     }
-} 
+}
